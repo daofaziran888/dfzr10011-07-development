@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from app.schemas import ActionResult, EntryPayload, PageResult
+from app.services import mergeflow
 from app.services.shard import ShardService
 
 router = APIRouter(prefix="/api/shard", tags=["任务分片调度"])
@@ -30,6 +31,32 @@ def list_entries(
     return PageResult(items=items, total=total, page=page, size=size)
 
 
+@router.get("/completion")
+def list_completion(plan_id: str | None = Query(default=None)) -> dict[str, Any]:
+    """分片完成记录与空分片状态分开展示；完成水位只按连续完成的序号推进。"""
+    plans = [mergeflow.engine.plan(plan_id)] if plan_id else mergeflow.engine.plans()
+    plans = [plan for plan in plans if plan is not None]
+    items = []
+    for plan in plans:
+        summary = mergeflow.engine.summarize(plan["plan_id"])
+        items.append({
+            "plan_id": plan["plan_id"],
+            "采集计划": plan["采集计划"],
+            "分片总数": summary["分片总数"],
+            "分片完成水位": summary["分片完成水位"],
+            "已完成分片数": summary["已完成分片数"],
+            "空分片数": summary["空分片数"],
+            "空计划": summary["空计划"],
+            "缺口": summary["缺口"],
+            "下一批待归并数": summary["下一批待归并数"],
+            "完成记录": summary["完成记录"],
+            "空分片": summary["空分片"],
+        })
+    if plan_id and not items:
+        raise HTTPException(status_code=404, detail=f"采集计划 {plan_id} 不存在")
+    return {"items": items, "total": len(items)}
+
+
 @router.get("/{entry_id}", response_model=dict)
 def get_entry(entry_id: int) -> dict:
     """读取单条分片任务明细；不存在时给出可读的错误说明。"""
@@ -45,6 +72,9 @@ def create_entry(payload: EntryPayload) -> ActionResult:
     entry, missing = service.create_entry(payload.values)
     if missing:
         return ActionResult(ok=False, message=f"缺少必填字段：{'、'.join(missing)}")
+    # 分片登记也属于业务入口：同步刷新存储模块的分待办口径。
+    if entry and entry.get("plan_id"):
+        mergeflow.engine.on_shards_changed(str(entry["plan_id"]))
     return ActionResult(ok=True, message="分片任务已登记", entry=entry)
 
 
@@ -55,6 +85,9 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     entry, message = service.run_action(entry_id, action)
     if entry is None:
         return ActionResult(ok=False, message=message)
+    # 分片完成后刷新存储模块的分待办口径；已生成快照的归档依据保持不变。
+    if action == "标记完成" and entry.get("plan_id"):
+        mergeflow.engine.on_shards_changed(str(entry["plan_id"]))
     return ActionResult(ok=True, message=message, entry=entry)
 
 

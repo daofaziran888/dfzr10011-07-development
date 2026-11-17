@@ -73,5 +73,39 @@ npm run dev
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
 
+## 归并水位与快照
+
+结果聚合归并（`merge`）、任务分片调度（`shard`）和采集存储分层（`storage`）共享同一套口径，
+核心实现在 `backend/app/services/mergeflow.py`，示例计划与分片完成记录在 `backend/app/seed_mergeflow.py`。
+
+- **分片完成水位**：从分片序号 1 开始只统计连续完成的记录，遇到第一个缺口就停住；
+  缺口之后即使已经完成也不抬高水位。空分片（记录数为 0）单独展示，不产生输出数据。
+- **归并快照**：每次生成固定一个水位，已归并数 = 水位，输出数据总量 = 水位内所有分片的记录合计，
+  两个数字都从同一份分片视图计算，不会来自不同刷新时刻。
+- **生成期间又有分片完成**：`policy=freeze` 冻结启动时水位，归档清单只显示启动水位，
+  新增分片计入下一批；`policy=extend` 延长到最后确认水位，归档清单包含延长后的范围，
+  下一批只保留水位之后的记录。
+- **幂等与续跑**：同一条聚合任务只有一个归并批次；重复启动复用已有快照，不会生成第二份；
+  失败后可以从缺口继续，缺口未闭合时直接拦下并说明原因。
+- **写入异常**：快照、归并结果、归档条目、闸门、复核清单、分待办一次性提交，
+  模拟写入异常时整批回滚，不会留下有归档条目却没有归并结果的半快照。
+- **存储读取**：存储分层按快照版本（`snapshot_version` / `snapshot_id`）读取归档清单，
+  旧版本保留原水位与原数据口径，新版本不会覆盖旧版本的依据。
+
+相关接口：
+
+| 接口 | 说明 |
+| --- | --- |
+| `GET /api/merge/watermark?plan_id=PLAN-0002` | 读取分片完成水位与同水位下的输出数据总量 |
+| `GET /api/merge/completion` | 分片完成记录与空分片状态（分开展示） |
+| `POST /api/merge/{id}/actions` | `启动归并` / `重试归并` / `归档任务`，可带 `policy`、`concurrent_shards`、`simulate_write_error` |
+| `GET /api/merge/snapshots[/{reference}]` | 归并快照列表与明细（含归并结果、归档条目、一致性核对） |
+| `GET /api/storage/gates` | 新增归并闸门 |
+| `GET /api/storage/pending` | 分待办（下一批待归并数） |
+| `GET /api/storage/reviews` | 分复核清单 |
+| `GET/POST /api/storage/manifest` | 按快照版本读取 / 幂等生成归档清单 |
+
+后端自测：`cd backend && PYTHONPATH=.venv python3 -m unittest discover -s tests -v`（复用 `.venv` 里的依赖，无需重新安装）。
+
 领域：数据工程
 子方向：数据采集、爬虫与RPA

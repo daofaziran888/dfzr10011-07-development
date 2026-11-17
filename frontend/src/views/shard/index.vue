@@ -59,11 +59,75 @@
       <span>共 {{ total }} 条任务分片调度记录</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
     </footer>
+
+    <section class="panel">
+      <header class="panel-head">
+        <h3>采集计划分片总数与完成水位</h3>
+        <button class="btn ghost" type="button" @click="loadCompletion">刷新完成记录</button>
+      </header>
+      <div v-for="group in completionGroups" :key="group.plan_id" class="completion-group">
+        <h4 class="sub-title">
+          {{ group.采集计划 }}
+          <span class="tag">分片总数 {{ group.分片总数 }}</span>
+          <span class="tag">完成水位 {{ group.分片完成水位 }}</span>
+          <span class="tag">空分片 {{ group.空分片数 }}</span>
+          <span v-if="group.缺口.length" class="tag warn">缺口 {{ group.缺口.join('、') }}</span>
+        </h4>
+        <p class="hint">分片完成记录</p>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>分片编号</th>
+              <th>分片序号</th>
+              <th>分片范围</th>
+              <th>记录数</th>
+              <th>完成时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in group.完成记录" :key="`done-${row.id}`">
+              <td>{{ row.分片编号 }}</td>
+              <td>{{ row.分片序号 }}</td>
+              <td>{{ row.分片范围 }}</td>
+              <td>{{ row.记录数 }}</td>
+              <td>{{ row.完成时间 || '—' }}</td>
+            </tr>
+            <tr v-if="!group.完成记录.length">
+              <td colspan="5" class="empty-state">暂无分片完成记录</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="hint">空分片状态（与完成记录分开统计）</p>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>分片编号</th>
+              <th>分片序号</th>
+              <th>分片范围</th>
+              <th>分片状态</th>
+              <th>记录数</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in group.空分片" :key="`empty-${row.id}`">
+              <td>{{ row.分片编号 }}</td>
+              <td>{{ row.分片序号 }}</td>
+              <td>{{ row.分片范围 }}</td>
+              <td>{{ row.分片状态 }}</td>
+              <td>{{ row.记录数 }}</td>
+            </tr>
+            <tr v-if="!group.空分片.length">
+              <td colspan="5" class="empty-state">没有空分片</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
   </section>
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 import { request } from '@/api/client'
 
@@ -73,10 +137,14 @@ const ENDPOINT = '/api/shard'
 const columns = ["分片编号", "采集计划", "分片范围", "分配节点", "开始时间", "结束时间", "重试次数", "分片状态"]
 const actions = ["分配节点", "重试分片", "标记完成"]
 const statuses = ["待分配", "执行中", "已完成", "执行失败"]
-const stats = [{"label": "分片任务总数", "value": 0}, {"label": "执行中分片", "value": 0}, {"label": "已完成分片", "value": 0}]
-
 const rows = ref<Row[]>([])
 const total = ref(0)
+const completionGroups = ref<Record<string, any>[]>([])
+const stats = computed(() => [
+  { label: '分片任务总数', value: total.value },
+  { label: '执行中分片', value: rows.value.filter((row) => row.status === '执行中').length },
+  { label: '已完成分片', value: rows.value.filter((row) => row.status === '已完成').length },
+])
 const errorMessage = ref('')
 const filters = ref<Record<string, string>>({})
 const filterFields = columns.slice(0, 3)
@@ -121,8 +189,20 @@ async function reload() {
     const payload = await response.json()
     rows.value = payload.items ?? []
     total.value = payload.total ?? rows.value.length
+    await loadCompletion()
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '任务分片调度列表读取失败'
+  }
+}
+
+async function loadCompletion() {
+  try {
+    const response = await request(`${ENDPOINT}/completion`)
+    if (!response.ok) throw new Error('分片完成记录读取失败')
+    const payload = await response.json()
+    completionGroups.value = payload.items ?? []
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '分片完成记录读取失败'
   }
 }
 
